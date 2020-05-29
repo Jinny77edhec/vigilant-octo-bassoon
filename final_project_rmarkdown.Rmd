@@ -1,0 +1,316 @@
+---
+title: "Practical Machine Learning - Final Project Coursera"
+author: "Jim Saing"
+date: "May 29, 2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+```
+
+
+## Project Introduction
+
+### Background
+
+Using devices such as _Jawbone Up_, _Nike FuelBand_, and _Fitbit_ it is now possible to collect a large amount of data about personal activity relatively inexpensively. These type of devices are part of the quantified self movement – a group of enthusiasts who take measurements about themselves regularly to improve their health, to find patterns in their behavior, or because they are tech geeks. One thing that people regularly do is quantify how _much_ of a particular activity they do, but they rarely quantify _how well they do it_. In this project, your goal will be to use data from accelerometers on the belt, forearm, arm, and dumbell of 6 participants. They were asked to perform barbell lifts correctly and incorrectly in 5 different ways. More information is available from the website here: <http://groupware.les.inf.puc-rio.br/har> (see the section on the Weight Lifting Exercise Dataset).
+
+### Data
+
+The training data for this project are available here:
+
+<https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv>
+
+The test data are available here:
+
+<https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv>
+
+The data for this project come from this source: <http://groupware.les.inf.puc-rio.br/har>. If you use the document you create for this class for any purpose please cite them as they have been very generous in allowing their data to be used for this kind of assignment.
+
+### Goal
+
+The goal of your project is to predict the manner in which they did the exercise. This is the __*classe*__ variable in the training set. You may use any of the other variables to predict with. You should create a report describing how you built your model, how you used cross validation, what you think the expected out of sample error is, and why you made the choices you did. You will also use your prediction model to predict 20 different test cases.
+
+## Data Processing
+  
+  
+### Libraries
+```{r libraries, message=FALSE,warning=FALSE}
+library(caret);library(ggplot2);library(randomForest);library(corrplot);library(rattle);library(gbm);library(e1071);library(dplyr)
+```
+
+```{r}
+
+```
+  
+  
+### Loading Data
+
+__*"stringsAsFactors = TRUE"*__  is used to get a factor type instead of strings. It will be usefull later to get the Confusion Matrices.
+```{r loading}
+train_test <-  read.csv(url("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"), stringsAsFactors = TRUE)
+validation <- read.csv(url("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"), stringsAsFactors = TRUE)
+
+```
+
+  
+  
+### Cleaning the training data
+
+```{r}
+#Describing Data
+str(train_test %>% select(classe, everything()));dim(train_test)
+class(train_test$classe);summary(train_test %>% select(classe))
+```
+We are going to predict the variable __*classe*__ that is composed of 5 possible outputs A, B, C, D and E as _factor_ type.    
+
+```{r}
+par(mfrow=c(1,1))
+plot(train_test$X,train_test$classe,xlab = "Index",ylab = "Classe",col="light blue")
+```
+
+By looking at the data, it can be noticed that the first seven columns are not related to the __*classe*__ variable that is to be predicted, and there are columns containing NAs. More specifically, with the example of the index, the __*classe*__ variable is ordered according to the index. By adding the index to our models, it can bias them as __*X*__ should not have links with __*classe*__ except by the way the data are ordered.    
+
+Let's remove these first seven columns and all the column containing NAs.
+
+```{r}
+train_test <- train_test[,-c(1:7)]
+train_test <- train_test[ , colSums(is.na(train_test)) == 0]
+```
+
+Then we remove the near zero variance variables to clean even more the data.
+
+```{r}
+nzcv <- nearZeroVar(train_test)
+train_test <- train_test[,-nzcv]
+```
+
+  
+  
+### Data Partitioning 
+
+We decide to split it to sub-training and sub-testing set, with 85% going to the first one as the initial training set is very large.
+
+```{r}
+set.seed(33244)
+inTrain <- createDataPartition(y=train_test$classe, p=0.85, list = FALSE)
+training <- train_test[inTrain,]
+testing <- train_test[-inTrain,]
+
+dim(training)
+```
+    
+After cleaning, we are down to 53 variables. Let's have a look on their correlation
+
+```{r}
+par(mfrow=c(1,1))
+correl_plot <- corrplot(cor(training[,-53]),method="color",type="upper",tl.col="black",tl.cex=0.7)
+
+
+M <- abs(cor(training[,-53]))
+diag(M) <- 0
+# Highly correlated variables
+which(M>0.9, arr.ind=T)
+```
+
+
+## Model Building
+
+<div style ="margin-bottom:10px;">
+</div>
+
+For this project, by looking at the structure of the data and the result that we are looking for, we will at first use models based on trees, and then we will try model based predictions.  
+Five models will be used:  
+
+<div style ="margin-bottom:5px;">
+</div>
+
+1.    Decision Tree  
+2.    Random Forest  
+3.    Gradient Boosting with trees 
+4.    Linear Discriminant Analysis  
+5.    Naive Bayes  
+
+Furthermore, for each model, we will use the raw data and the principal components data to see if the Principal Component Analysis generates a good prediction.  
+
+<div style ="margin-bottom:5px;">
+</div>
+
+The algorithms will be only explained for the tree model as for the other models, it is the same principle by using the same __caret__ functions.
+
+
+### Preprocessing with PCA
+
+As we have lots of variables, we try to use PCA to reduce dimensionality and by the same time the complexity. 
+
+```{r}
+preProc <- preProcess(training[,-53],method = "pca",pcaComp=20)
+trainPC <- predict(preProc,training[,-53])
+testPC <- predict(preProc,testing[,-53])
+
+sum(var(trainPC))/52
+```
+
+
+```{r,echo=FALSE}
+paste("We choose 20 Principal components as they explain ", round(100*sum(var(trainPC))/52,4),"% of the variance")
+```
+
+### Training Control Parameters - Cross validations
+
+We only use the 5-folds CV to reduce the overfitting in the different model while not adding too much complexity in our models (especially for the random forest).
+```{r}
+fitControl <- trainControl(method="cv", number=5)
+```
+
+
+### 1. Decision Tree
+
+The Decision Tree model iteratively splits variables into groups and evaluates homogeneity within each group
+```{r}
+#Model Building - Predicting with trees
+
+#Set seed to have the same result each time as it is pseudo-random
+set.seed(33244) 
+#Fit predictive model over different tuning parameters, here in the training data, we fit the 'classe' variable on the 'rpart' method with the 'fitControl' as the train control for the cross validation
+fit_tree <- train(classe~., method='rpart',data=training, trControl=fitControl)
+#Use the model to predict on the testing set
+pred_tree <- predict(fit_tree,newdata=testing)
+#Create the confusion matrix to analyze the result on the testing set
+cm_tree <- confusionMatrix(pred_tree,testing$classe)
+
+#Plot the tree
+par(mfrow=c(1,1))
+library(rattle)
+fancyRpartPlot(fit_tree$finalModel)
+
+#With PCA
+fit_tree_pc <- train(x=trainPC,y=training$classe, method='rpart',trControl=fitControl)
+cm_tree_pc <- confusionMatrix(testing$classe,predict(fit_tree_pc,testPC))
+```
+
+
+### 2. Random Forest
+
+The Random Forest is more complex than the Decision Tree but based on this one. It bootstraps samples, at each split bootstraps variables, grows multiples trees then votes for the best.     
+```{r}
+#Model Building - Predicting with Random Forest
+set.seed(1234)
+fit_rf <- train(classe~., method="rf", data=training,trControl= fitControl)
+pred_rf <- predict(fit_rf,newdata=testing)
+cm_rf <- confusionMatrix(pred_rf,testing$classe)
+
+#With PCA
+fit_rf_pc <- train(x=trainPC, y=training$classe, method="rf",trControl=fitControl)
+cm_rf_pc <- confusionMatrix(testing$classe, predict(fit_rf_pc,testPC))
+```
+
+### 3. Gradient Boosting with trees
+
+The GBM method takes lots of trees, weights them and creates a classifier that combines them.
+```{r}
+#Model Building - Gradient Boosting with trees
+set.seed(33244)
+fit_gbm <- train(classe~., method="gbm", data=training, trControl=fitControl, verbose=FALSE)
+pred_gbm <- predict(fit_gbm,newdata=testing)
+cm_gbm <- confusionMatrix(pred_gbm,testing$classe)
+
+#With PCA
+fit_gbm_pc <- train(x=trainPC, y=training$classe, method="gbm", trControl=fitControl, verbose=FALSE)
+cm_gbm_pc <- confusionMatrix(testing$classe, predict(fit_gbm_pc, testPC))
+```
+
+
+### 4. Linear Discriminant Analysis 
+```{r}
+#Model building - Linear Discriminant Analysis
+set.seed(33244)
+fit_lda <- train(classe~., method="lda", data=training, trControl=fitControl)
+pred_lda <- predict(fit_lda,newdata=testing)
+cm_lda <- confusionMatrix(pred_lda,testing$classe)
+
+#With PCA
+fit_lda_pc <- train(x=trainPC, y=training$classe, method="lda",trControl=fitControl)
+cm_lda_pc <- confusionMatrix(testing$classe, predict(fit_lda_pc,testPC))
+```
+
+### 5. Naive Bayes
+```{r,message=FALSE,warning=FALSE}
+set.seed(33244)
+fit_nb <- train(classe~., method="nb", data=training, trControl=fitControl)
+pred_nb <- predict(fit_nb,newdata=testing)
+cm_nb <- confusionMatrix(pred_nb,testing$classe)
+
+fit_nb_pc <- train(x=trainPC, y=training$classe, method="nb",trControl=fitControl)
+cm_nb_pc <- confusionMatrix(testing$classe, predict(fit_nb_pc,testPC))
+```
+
+### Overall Comparison between the models
+
+The comparison between the models is made in the testing sample to get the out of sample error.
+```{r}
+overall_table <- rbind(cm_tree$overall, cm_tree_pc$overall, cm_rf$overall, cm_rf_pc$overall,
+                       cm_gbm$overall, cm_gbm_pc$overall, cm_lda$overall, cm_lda_pc$overall,
+                       cm_nb$overall, cm_nb_pc$overall)
+rownames(overall_table) <- c("Tree","Tree PCA","RF","RF PCA","GBM","GBM PCA",
+                             "LDA","LDA PCA","NB","NB PCA")
+
+overall_table
+
+par(mfrow=c(2,2))
+plot(cm_rf$table,cm_rf$byClass,main="Random Forest Confusion Matrix",col="black")
+plot(cm_tree$table,cm_tree$byClass,main="Tree Prediction Confusion Matrix")
+plot(cm_nb$table,cm_nb$byClass,main="Naive Bayes Confusion Matrix")
+plot(cm_gbm$table, cm_gbm$byClass,main="GBM Confusion Matrix", col="black")
+```
+  
+<div style ="margin-bottom:10px;">
+</div>
+
+We can see that the PCA lower the accuracy in each case. It is hard to interpret why PCA reduces the accuracy, though it can be explained by the fact that PCA is linear while it's possible that we have non-linear dependencies.  
+
+<div style ="margin-bottom:5px;">
+</div>
+
+According to the different charts above, the ranking by Accuracy and Kappa of the different method without PCA is  
+Random Forest > Boosting with trees > Naive Bayes > LDA > Decision Tree    
+
+The poor accuracy of the tree decision can be understood through its tree chart, it has only taken into account very few variables.
+<div style ="margin-bottom:30px;">
+</div>
+
+## Conclusion
+
+<div style ="margin-bottom:15px;">
+</div>
+
+### Chosen model - Random Forest without PCA
+
+With the overall table, the accuracy of the Random Forest model is the highest, so its out of sample error is the lowest. Even if this model is very long to compute, we choose that one to predict the __*classe*__ of the validation set.  
+
+Random Forest Out of sample error:
+```{r, echo=FALSE}
+paste("Out Sample error is ", round((1-cm_rf$overall[1])*100,digits = 4),"%")
+```
+<div style ="margin-bottom:10px;">
+</div>
+Variables by Importance in the Random Forest model:
+
+```{r}
+varImp(fit_rf)
+```
+
+
+### Validation Prediction
+<div style ="margin-bottom:10px;">
+</div>
+Now, as the model is selected, we apply it to the validation test to predict to which __*classe*__ the 20 test cases belong to.  
+
+```{r}
+pred_validation <- predict(fit_rf,validation)
+pred_validation
+paste("The expected Accuracy is ", round((cm_rf$overall[1])*100,digits = 4),"%")
+```
+
